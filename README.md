@@ -85,16 +85,6 @@ options:
 | ollama | `OLLAMA_BASE_URL` | llama3.2 | Local, free |
 | vllm | `VLLM_BASE_URL` | mistral | Local inference server |
 
-### Model Aliases
-
-Aliases can be used instead of full model names:
-
-| Alias | Resolves To |
-|-------|-------------|
-| mini | gpt-oss-120b |
-| coder | qwen3.5-122b |
-| agentic | qwen3.5-122b |
-| thinker | kimi-k2.6 |
 
 ## Output
 

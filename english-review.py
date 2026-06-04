@@ -45,21 +45,8 @@ from transformers import WhisperForConditionalGeneration, WhisperProcessor
 load_dotenv()
 
 
-# Model aliases for convenience
-MODEL_ALIASES = {
-    "mini": "gpt-oss-120b",
-    "coder": "qwen3.5-122b",
-    "agentic": "qwen3.5-122b",
-    "thinker": "kimi-k2.6",
-}
-
 # Supported providers
 PROVIDERS = ["metacentrum", "openai", "ollama", "vllm"]
-
-
-def resolve_model(model_name: str) -> str:
-    """Resolve model alias to full model name."""
-    return MODEL_ALIASES.get(model_name, model_name)
 
 
 def create_llm_client(provider: str, model: str, api_key: str | None = None, base_url: str | None = None) -> OpenAI:
@@ -68,14 +55,14 @@ def create_llm_client(provider: str, model: str, api_key: str | None = None, bas
 
     Args:
         provider: One of 'metacentrum', 'openai', 'ollama', 'vllm'
-        model: Model name or alias
+        model: Model name
         api_key: API key (required for metacentrum and openai)
         base_url: Custom base URL (optional, used for ollama/vllm)
 
     Returns:
         Configured OpenAI-compatible client
     """
-    resolved_model = resolve_model(model)
+    resolved_model = model
 
     if provider == "metacentrum":
         token = api_key or os.getenv("E_INFRA_API_TOKEN")
@@ -144,7 +131,7 @@ class SpokenEnglishEvaluationPipeline:
         self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
 
         self.llm_client = create_llm_client(provider, model, api_key, base_url)
-        self.llm_model = resolve_model(model)
+        self.llm_model = model
         print(f"Using LLM: {self.llm_model} via {provider}")
 
     def process_audio(self, audio_path: str, expected_text: str | None = None) -> dict:
