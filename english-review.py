@@ -1,18 +1,51 @@
+#!/usr/bin/env python3
+"""
+Spoken English Evaluation Pipeline
+
+Evaluates spoken English proficiency using:
+- Whisper (ASR) for speech-to-text transcription
+- LLM (DeepSeek, OpenAI, or local) for linguistic evaluation
+
+Provides detailed feedback on:
+- Pronunciation issues (based on ASR confidence and common learner challenges)
+- Fluency breakdowns (repetitions, self-corrections, run-on sentences)
+- Grammar specifics (exact errors with corrections)
+- Vocabulary feedback
+- CEFR level estimation and practice recommendations
+
+Usage:
+    # Using MetaCentrum AIaaS (default)
+    export E_INFRA_API_TOKEN="your-token"
+    python english-review.py
+
+    # Using OpenAI
+    export OPENAI_API_KEY="your-key"
+    python english-review.py --provider openai --model gpt-4o
+
+    # Using local Ollama
+    python english-review.py --provider ollama --model llama3.2
+
+Requirements:
+    pip install -r requirements.txt
+"""
+
 import os
+import argparse
+import datetime
+from pathlib import Path
+
 import librosa
 import torch
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from openai import OpenAI
 from dotenv import load_dotenv
 from jiwer import wer
+from openai import OpenAI
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
+# Load environment variables from .env file
 load_dotenv()
 
-llm_client = OpenAI(
-    api_key=os.environ.get("E_INFRA_API_TOKEN", "your-api-key"),
-    base_url="https://llm.ai.e-infra.cz/v1"
-)
 
+# Model aliases for convenience
 MODEL_ALIASES = {
     "mini": "gpt-oss-120b",
     "coder": "qwen3.5-122b",
@@ -20,22 +53,111 @@ MODEL_ALIASES = {
     "thinker": "kimi-k2.6",
 }
 
+# Supported providers
+PROVIDERS = ["metacentrum", "openai", "ollama", "vllm"]
+
+
 def resolve_model(model_name: str) -> str:
+    """Resolve model alias to full model name."""
     return MODEL_ALIASES.get(model_name, model_name)
 
 
-class SpokenEnglishEvaluationPipeline:
+def create_llm_client(provider: str, model: str, api_key: str | None = None, base_url: str | None = None) -> OpenAI:
+    """
+    Create an LLM client based on the selected provider.
 
-    def __init__(self, llm_model: str = "deepseek-v4-pro-thinking"):
+    Args:
+        provider: One of 'metacentrum', 'openai', 'ollama', 'vllm'
+        model: Model name or alias
+        api_key: API key (required for metacentrum and openai)
+        base_url: Custom base URL (optional, used for ollama/vllm)
+
+    Returns:
+        Configured OpenAI-compatible client
+    """
+    resolved_model = resolve_model(model)
+
+    if provider == "metacentrum":
+        token = api_key or os.getenv("E_INFRA_API_TOKEN")
+        if not token:
+            raise ValueError("E_INFRA_API_TOKEN not found. Set it via env var or --api-key flag.")
+        return OpenAI(
+            api_key=token,
+            base_url="https://llm.ai.e-infra.cz/v1",
+        )
+
+    elif provider == "openai":
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("OPENAI_API_KEY not found. Set it via env var or --api-key flag.")
+        return OpenAI(api_key=key)
+
+    elif provider == "ollama":
+        url = base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        return OpenAI(
+            api_key="ollama",  # Placeholder, not used by Ollama
+            base_url=url,
+        )
+
+    elif provider == "vllm":
+        url = base_url or os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        key = api_key or os.getenv("VLLM_API_KEY", "placeholder")
+        return OpenAI(
+            api_key=key,
+            base_url=url,
+        )
+
+    else:
+        raise ValueError(f"Unknown provider: {provider}. Choose from {PROVIDERS}")
+
+
+class SpokenEnglishEvaluationPipeline:
+    """
+    Pipeline for evaluating spoken English proficiency.
+
+    Attributes:
+        llm_client: Configured LLM client for linguistic evaluation
+        llm_model: Model name used for evaluation
+        whisper_processor: Whisper tokenizer/feature extractor
+        whisper_model: Whisper model for ASR
+    """
+
+    def __init__(
+        self,
+        provider: str = "metacentrum",
+        model: str = "deepseek-v4-pro-thinking",
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
+        """
+        Initialize the evaluation pipeline.
+
+        Args:
+            provider: LLM provider ('metacentrum', 'openai', 'ollama', 'vllm')
+            model: Model name or alias for linguistic evaluation
+            api_key: API key for the provider
+            base_url: Custom base URL for local providers
+        """
         print("Loading models from Hugging Face...")
 
         self.whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
         self.whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
 
-        self.llm_model = resolve_model(llm_model)
-        print(f"Using LLM: {self.llm_model}")
+        self.llm_client = create_llm_client(provider, model, api_key, base_url)
+        self.llm_model = resolve_model(model)
+        print(f"Using LLM: {self.llm_model} via {provider}")
 
-    def process_audio(self, audio_path: str, expected_text: str = None) -> dict:
+    def process_audio(self, audio_path: str, expected_text: str | None = None) -> dict:
+        """
+        Process an audio file and return comprehensive English evaluation.
+
+        Args:
+            audio_path: Path to .wav audio file
+            expected_text: Optional expected transcript for WER calculation
+
+        Returns:
+            Dictionary with transcription, acoustic feedback, and linguistic evaluation
+        """
         audio_input, sample_rate = librosa.load(audio_path, sr=16000)
 
         print("Transcribing speech to text...")
@@ -45,7 +167,7 @@ class SpokenEnglishEvaluationPipeline:
             input_features,
             language="en",
             task="transcribe",
-            max_new_tokens=256
+            max_new_tokens=256,
         )
 
         transcription = self.whisper_processor.batch_decode(generated_tokens, skip_special_tokens=True)[0].strip()
@@ -55,8 +177,8 @@ class SpokenEnglishEvaluationPipeline:
 
         print(f"Transcription: '{transcription}'")
 
-        word_segments = []
-        low_confidence_words = []
+        word_segments: list[dict] = []
+        low_confidence_words: list[dict] = []
 
         if expected_text:
             print("Calculating Word Error Rate against expected text...")
@@ -64,7 +186,7 @@ class SpokenEnglishEvaluationPipeline:
             pronunciation_score = max(0, 100 - (word_error_rate * 100))
         else:
             word_error_rate = None
-            pronunciation_score = 100 - (len(low_confidence_words) * 5) if word_segments else 50
+            pronunciation_score = 100.0 if not low_confidence_words else 100 - (len(low_confidence_words) * 5)
 
         pronunciation_class = f"Pronunciation Score: {pronunciation_score:.1f}/100"
         if low_confidence_words:
@@ -81,10 +203,17 @@ class SpokenEnglishEvaluationPipeline:
             "expected_text": expected_text,
             "word_error_rate": word_error_rate,
             "acoustic_feedback": pronunciation_class,
-            "linguistic_evaluation": linguistic_evaluation
+            "linguistic_evaluation": linguistic_evaluation,
         }
 
-    def _evaluate_spoken_english(self, transcript: str, word_segments: list, low_confidence_words: list, expected_text: str = None) -> str:
+    def _evaluate_spoken_english(
+        self,
+        transcript: str,
+        word_segments: list[dict],
+        low_confidence_words: list[dict],
+        expected_text: str | None = None,
+    ) -> str:
+        """Generate detailed linguistic evaluation using the LLM."""
         system_prompt = """You are an expert certified English language examiner (IELTS/CEFR).
 Your task is to provide detailed, actionable feedback on spoken English. Focus on specific examples rather than general scores."""
 
@@ -150,91 +279,152 @@ If grammar is strong, highlight what makes it good.
 Be constructive, specific, and actionable. Quote exact words/phrases from the transcript when giving feedback.
 """
 
-        response = llm_client.chat.completions.create(
+        response = self.llm_client.chat.completions.create(
             model=self.llm_model,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=2500
+            max_tokens=2500,
         )
         return response.choices[0].message.content
 
     def generate_report(self, results: dict) -> str:
-        report = f"""
-{'='*70}
-SPOKEN ENGLISH DETAILED EVALUATION REPORT
-{'='*70}
+        """Format evaluation results into a Markdown report."""
+        provider_url = str(self.llm_client.base_url)
 
-File: {results['audio_file']}
+        report = f"""# Spoken English Evaluation Report
 
-{'-'*50}
-TRANSCRIPTION
-{'-'*50}
-{results['transcription']}
+| Field | Value |
+|-------|-------|
+| **File** | `{results['audio_file']}` |
+| **Model** | `{self.llm_model}` |
+| **Provider** | `{provider_url}` |
+
+---
+
+## 🎤 Transcription
+
+> {results['transcription']}
 
 """
-        if results.get('expected_text'):
+        if results.get("expected_text"):
             report += f"""
-{'-'*50}
-EXPECTED TEXT
-{'-'*50}
-{results['expected_text']}
+## 📝 Expected Text
+
+> {results['expected_text']}
+
+**Word Error Rate**: {results['word_error_rate']:.1%}
 
 """
         report += f"""
-{'-'*50}
-ACOUSTIC ANALYSIS
-{'-'*50}
+## 🔊 Acoustic Analysis
+
 {results['acoustic_feedback']}
 
 """
-        if results.get('low_confidence_words'):
+        if results.get("low_confidence_words"):
+            words = ", ".join([f"`{w['word']}`" for w in results['low_confidence_words']])
             report += f"""
-Low confidence words: {[w['word'] for w in results['low_confidence_words']]}
+**Low confidence words**: {words}
 
 """
         report += f"""
-{'-'*50}
-DETAILED FEEDBACK
-{'-'*50}
+---
+
+## 📋 Detailed Feedback
+
 {results['linguistic_evaluation']}
 
-{'='*70}
-Generated by: {self.llm_model}
-{'='*70}
+---
+
+*Generated by {self.llm_model} via {provider_url}*
 """
         return report
 
 
-if __name__ == "__main__":
-    import datetime
+def main():
+    """Main entry point with argument parsing."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate spoken English proficiency using AI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Using MetaCentrum AIaaS (default)
+  export E_INFRA_API_TOKEN="your-token"
+  python english-review.py data/Good.wav
 
-    RESULTS_DIR = "results"
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+  # Using OpenAI
+  export OPENAI_API_KEY="your-key"
+  python english-review.py data/Good.wav --provider openai --model gpt-4o
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = f"evaluation_{timestamp}.md"
-    output_path = os.path.join(RESULTS_DIR, output_filename)
+  # Using local Ollama
+  python english-review.py data/Good.wav --provider ollama --model llama3.2
 
-    pipeline = SpokenEnglishEvaluationPipeline(llm_model="deepseek-v4-pro-thinking")
+  # With expected text for WER calculation
+  python english-review.py data/Good.wav --expected-text "Hello, I'm a student..."
 
-    audio_file = "data/Wrong.wav"
-    expected_text = None
+  # Save to specific output file
+  python english-review.py data/Good.wav --output my_report.txt
+        """,
+    )
 
-    if os.path.exists(audio_file):
-        try:
-            results = pipeline.process_audio(audio_file, expected_text)
-            report = pipeline.generate_report(results)
+    parser.add_argument("audio_file", nargs="?", default="data/Good.wav", help="Path to .wav audio file (default: data/Good.wav)")
+    parser.add_argument("--provider", "-p", choices=PROVIDERS, default="metacentrum", help="LLM provider (default: metacentrum)")
+    parser.add_argument("--model", "-m", default="deepseek-v4-pro-thinking", help="Model name or alias (default: deepseek-v4-pro-thinking)")
+    parser.add_argument("--api-key", "-k", help="API key for the provider")
+    parser.add_argument("--base-url", "-b", help="Custom base URL for local providers")
+    parser.add_argument("--expected-text", "-e", help="Expected transcript for WER calculation")
+    parser.add_argument("--output", "-o", help="Output file path (default: results/evaluation_TIMESTAMP.txt)")
+    parser.add_argument("--results-dir", "-d", default="results", help="Results directory (default: results)")
 
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(report)
+    args = parser.parse_args()
 
-            print(f"Results saved to: {output_path}")
+    # Create results directory
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-        except Exception as e:
-            print(f"Error during evaluation: {e}")
+    # Determine output path
+    if args.output:
+        output_path = Path(args.output)
+        if not output_path.is_absolute():
+            output_path = results_dir / output_path
     else:
-        print(f"Audio file '{audio_file}' not found.")
-        print("Please provide a valid .wav file path for evaluation.")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = results_dir / f"evaluation_{timestamp}.md"
+
+    # Initialize pipeline
+    try:
+        pipeline = SpokenEnglishEvaluationPipeline(
+            provider=args.provider,
+            model=args.model,
+            api_key=args.api_key,
+            base_url=args.base_url,
+        )
+    except Exception as e:
+        print(f"Error initializing pipeline: {e}")
+        return 1
+
+    # Process audio
+    if not os.path.exists(args.audio_file):
+        print(f"Audio file '{args.audio_file}' not found.")
+        return 1
+
+    try:
+        results = pipeline.process_audio(args.audio_file, args.expected_text)
+        report = pipeline.generate_report(results)
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(report)
+
+        print(f"Results saved to: {output_path}")
+        return 0
+
+    except Exception as e:
+        print(f"Error during evaluation: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    exit(main())

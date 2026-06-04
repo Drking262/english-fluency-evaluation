@@ -1,7 +1,10 @@
+# Core dependencies
 openai>=1.0.0
 python-dotenv>=1.0.0
 librosa>=0.10.0
 torch>=2.0.0
 transformers>=4.35.0
-soundfile>=0.12.0
-numba>=0.58.0
+jiwer>=3.0.0
+
+# Optional: for better progress bars
+tqdm>=4.65.0
